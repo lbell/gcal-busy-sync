@@ -1,0 +1,109 @@
+/**
+ * One-way sync source calendars into an aggregate "free/busy" calendar.
+ * Includes all-day and recurring events.
+ * Adds a buffer before/after each timed event.
+ * Throttled to avoid Google Apps Script quota limits.
+ */
+
+function syncCalendars() {
+  // === CONFIGURATION ===
+  const SOURCE_CAL_IDS = [
+    '',    // Calendar 1 to pull in
+    ''     // Calendar 2 to pull in
+  ];
+  const TARGET_CAL_ID = '';     // The shared "free/busy" calendar
+  
+  const LOOKAHEAD_DAYS = 365;   // Time window to sync
+  const THROTTLE_MS = 200;      // Delay between create/update/delete to avoid quota limits
+  const BUFFER_MINUTES = 15;    // Buffer before/after each timed event
+  
+  const now = new Date();
+  const end = new Date();
+  end.setDate(now.getDate() + LOOKAHEAD_DAYS);
+
+  const targetCal = CalendarApp.getCalendarById(TARGET_CAL_ID);
+  if (!targetCal) throw new Error('Target calendar not found or no permission.');
+
+  // Get all target events in range
+  const targetEvents = targetCal.getEvents(now, end);
+  const targetMap = new Map();
+  for (let event of targetEvents) {
+    const desc = event.getDescription();
+    const match = desc.match(/SRCID:([^\s]+)/);
+    if (match) targetMap.set(match[1], event);
+  }
+
+  const seenIds = new Set();
+
+  // === Process each source calendar ===
+  for (let calId of SOURCE_CAL_IDS) {
+    const cal = CalendarApp.getCalendarById(calId);
+    if (!cal) continue;
+    // getEvents expands recurring events automatically
+    const events = cal.getEvents(now, end);
+
+    for (let e of events) {
+      const srcId = `${calId}::${e.getId()}::${e.getStartTime().getTime()}`;
+      if (seenIds.has(srcId)) continue;
+      seenIds.add(srcId);
+
+      createOrUpdateBusy(e, srcId, targetCal, targetMap, THROTTLE_MS, BUFFER_MINUTES);
+    }
+  }
+
+  // === Delete stale events ===
+  for (let [srcId, evt] of targetMap.entries()) {
+    if (!seenIds.has(srcId)) {
+      evt.deleteEvent();
+      Utilities.sleep(THROTTLE_MS);
+    }
+  }
+
+  // === Optional: clean up past events ===
+  const pastEvents = targetCal.getEvents(new Date(0), now);
+  for (let e of pastEvents) {
+    e.deleteEvent();
+    Utilities.sleep(THROTTLE_MS);
+  }
+
+  Logger.log(`Sync complete: ${seenIds.size} events synced.`);
+}
+
+/**
+ * Create or update a "Busy" placeholder in the target calendar
+ * Adds a buffer before/after each non–all-day event.
+ * Throttle included to avoid quota errors.
+ */
+function createOrUpdateBusy(event, srcId, targetCal, targetMap, throttleMs, bufferMinutes) {
+  const start = event.getStartTime();
+  const end = event.getEndTime();
+  const isAllDay = event.isAllDayEvent();
+
+  let bufferedStart = start;
+  let bufferedEnd = end;
+
+  // Only buffer timed events; keep all-day events as-is
+  if (!isAllDay) {
+    const bufferMs = bufferMinutes * 60 * 1000;
+    bufferedStart = new Date(start.getTime() - bufferMs);
+    bufferedEnd = new Date(end.getTime() + bufferMs);
+  }
+
+  const existing = targetMap.get(srcId);
+
+  if (existing) {
+    // Update timing if changed
+    if (existing.getStartTime().getTime() !== bufferedStart.getTime() ||
+        existing.getEndTime().getTime() !== bufferedEnd.getTime()) {
+      existing.setTime(bufferedStart, bufferedEnd);
+      Utilities.sleep(throttleMs);
+    }
+  } else {
+    // Create new busy placeholder
+    targetCal.createEvent('Busy', bufferedStart, bufferedEnd, {
+      description: `SRCID:${srcId}`,
+      transparency: 'opaque'
+    });
+    Utilities.sleep(throttleMs);
+  }
+}
