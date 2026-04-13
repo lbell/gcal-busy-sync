@@ -1,8 +1,17 @@
 /**
- * One-way sync source calendars into an aggregate "free/busy" calendar.
- * Includes all-day and recurring events.
- * Adds a buffer before/after each timed event.
- * Throttled to avoid Google Apps Script quota limits.
+ * gcal-busy-sync
+ * One-way sync of source calendars into an aggregate "free/busy" calendar.
+ * Includes all-day and recurring events, configurable buffers, and throttling
+ * to stay within Google Apps Script quota limits.
+ *
+ * Author:  LBell
+ * Project: https://github.com/lbell/gcal-busy-sync
+ *
+ * License: Do whatever you want with this — use it, modify it, redistribute
+ *          it, claim it as your own, sell it, improve it. Credit is appreciated
+ *          but not required. No warranties expressed or implied; use at your
+ *          own risk. The author is not responsible for any data loss, calendar
+ *          chaos, or accidental double-bookings.
  */
 function syncCalendars() {
 
