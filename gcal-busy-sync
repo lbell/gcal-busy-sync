@@ -4,19 +4,48 @@
  * Adds a buffer before/after each timed event.
  * Throttled to avoid Google Apps Script quota limits.
  */
-
 function syncCalendars() {
-  // === CONFIGURATION ===
+
+  // ╔══════════════════════════════════════════════════════════════╗
+  // ║                      EDIT THIS SECTION                       ║
+  // ╚══════════════════════════════════════════════════════════════╝
+
+  // -- Source calendars --
+  // Add the IDs of every calendar you want to pull into the combined calendar.
+  // Find a calendar's ID in Google Calendar → Settings → [calendar name] → Calendar ID.
   const SOURCE_CAL_IDS = [
-    '',    // Calendar 1 to pull in
-    ''     // Calendar 2 to pull in
+    'example1@gmail.com',       // e.g. Personal calendar
+    'example2@group.calendar.google.com'  // e.g. Work calendar
   ];
-  const TARGET_CAL_ID = '';     // The shared "free/busy" calendar
-  
-  const LOOKAHEAD_DAYS = 365;   // Time window to sync
-  const THROTTLE_MS = 200;      // Delay between create/update/delete to avoid quota limits
-  const BUFFER_MINUTES = 15;    // Buffer before/after each timed event
-  
+
+  // -- Target calendar --
+  // The ID of the combined "free/busy" calendar you want to sync into.
+  const TARGET_CAL_ID = 'your-target-calendar-id@group.calendar.google.com';
+
+  // -- How far ahead to sync (in days) --
+  const LOOKAHEAD_DAYS = 365;
+
+  // -- Buffer time around events (in minutes) --
+  // Adds padding before and after each timed event (not all-day events).
+  // Set to 0 for no buffer.
+  const BUFFER_MINUTES = 15;
+
+  // -- Show full event info or just "Busy"? --
+  // true  → copies the original event title and description
+  // false → shows "Busy" as the title (hides event details from viewers)
+  const SHOW_FULL_EVENT_INFO = false;
+
+  // -- Append the source calendar name to each event title? --
+  // true  → e.g. "Team Lunch [Work]" or "Busy [Personal]"
+  // false → e.g. "Team Lunch" or "Busy"
+  const APPEND_CALENDAR_NAME = false;
+
+  // ╔══════════════════════════════════════════════════════════════╗
+  // ║              🚫  DO NOT EDIT BELOW THIS LINE                 ║
+  // ╚══════════════════════════════════════════════════════════════╝
+
+  const THROTTLE_MS = 200;
+
   const now = new Date();
   const end = new Date();
   end.setDate(now.getDate() + LOOKAHEAD_DAYS);
@@ -24,7 +53,6 @@ function syncCalendars() {
   const targetCal = CalendarApp.getCalendarById(TARGET_CAL_ID);
   if (!targetCal) throw new Error('Target calendar not found or no permission.');
 
-  // Get all target events in range
   const targetEvents = targetCal.getEvents(now, end);
   const targetMap = new Map();
   for (let event of targetEvents) {
@@ -35,23 +63,25 @@ function syncCalendars() {
 
   const seenIds = new Set();
 
-  // === Process each source calendar ===
   for (let calId of SOURCE_CAL_IDS) {
     const cal = CalendarApp.getCalendarById(calId);
     if (!cal) continue;
-    // getEvents expands recurring events automatically
+
+    const calName = cal.getName();
     const events = cal.getEvents(now, end);
 
     for (let e of events) {
       const srcId = `${calId}::${e.getId()}::${e.getStartTime().getTime()}`;
       if (seenIds.has(srcId)) continue;
       seenIds.add(srcId);
-
-      createOrUpdateBusy(e, srcId, targetCal, targetMap, THROTTLE_MS, BUFFER_MINUTES);
+      createOrUpdateEvent(
+        e, srcId, targetCal, targetMap,
+        THROTTLE_MS, BUFFER_MINUTES,
+        SHOW_FULL_EVENT_INFO, APPEND_CALENDAR_NAME, calName
+      );
     }
   }
 
-  // === Delete stale events ===
   for (let [srcId, evt] of targetMap.entries()) {
     if (!seenIds.has(srcId)) {
       evt.deleteEvent();
@@ -59,7 +89,6 @@ function syncCalendars() {
     }
   }
 
-  // === Optional: clean up past events ===
   const pastEvents = targetCal.getEvents(new Date(0), now);
   for (let e of pastEvents) {
     e.deleteEvent();
@@ -69,12 +98,11 @@ function syncCalendars() {
   Logger.log(`Sync complete: ${seenIds.size} events synced.`);
 }
 
-/**
- * Create or update a "Busy" placeholder in the target calendar
- * Adds a buffer before/after each non–all-day event.
- * Throttle included to avoid quota errors.
- */
-function createOrUpdateBusy(event, srcId, targetCal, targetMap, throttleMs, bufferMinutes) {
+function createOrUpdateEvent(
+  event, srcId, targetCal, targetMap,
+  throttleMs, bufferMinutes,
+  showFullInfo, appendCalName, calName
+) {
   const start = event.getStartTime();
   const end = event.getEndTime();
   const isAllDay = event.isAllDayEvent();
@@ -82,26 +110,34 @@ function createOrUpdateBusy(event, srcId, targetCal, targetMap, throttleMs, buff
   let bufferedStart = start;
   let bufferedEnd = end;
 
-  // Only buffer timed events; keep all-day events as-is
   if (!isAllDay) {
     const bufferMs = bufferMinutes * 60 * 1000;
     bufferedStart = new Date(start.getTime() - bufferMs);
     bufferedEnd = new Date(end.getTime() + bufferMs);
   }
 
-  const existing = targetMap.get(srcId);
+  let title = showFullInfo ? (event.getTitle() || 'Busy') : 'Busy';
+  if (appendCalName && calName) title = `${title} [${calName}]`;
 
+  let description = `SRCID:${srcId}`;
+  if (showFullInfo) {
+    const originalDesc = event.getDescription();
+    if (originalDesc) description = `${originalDesc}\n\n${description}`;
+  }
+
+  const existing = targetMap.get(srcId);
   if (existing) {
-    // Update timing if changed
-    if (existing.getStartTime().getTime() !== bufferedStart.getTime() ||
-        existing.getEndTime().getTime() !== bufferedEnd.getTime()) {
-      existing.setTime(bufferedStart, bufferedEnd);
-      Utilities.sleep(throttleMs);
-    }
+    const timingChanged =
+      existing.getStartTime().getTime() !== bufferedStart.getTime() ||
+      existing.getEndTime().getTime() !== bufferedEnd.getTime();
+    const titleChanged = existing.getTitle() !== title;
+
+    if (timingChanged) existing.setTime(bufferedStart, bufferedEnd);
+    if (titleChanged) existing.setTitle(title);
+    if (timingChanged || titleChanged) Utilities.sleep(throttleMs);
   } else {
-    // Create new busy placeholder
-    targetCal.createEvent('Busy', bufferedStart, bufferedEnd, {
-      description: `SRCID:${srcId}`,
+    targetCal.createEvent(title, bufferedStart, bufferedEnd, {
+      description: description,
       transparency: 'opaque'
     });
     Utilities.sleep(throttleMs);
